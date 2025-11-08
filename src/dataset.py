@@ -4,23 +4,37 @@ from pathlib import Path
 import random
 
 EXERCISES = ["deadlift","lunge","pushup","row","squat"]
+FORM_LABELS = ["incorrect","correct"]  # 0, 1
 
 def to_id(value, vocab):
     return vocab.index(value)
 
 class KpSeqDataset(Dataset):
-    def __init__(self, labels_csv, split, seq_len=64, stride=2, drop_conf=True):
+    def __init__(self, labels_csv, split, seq_len=64, stride=2, drop_conf=True, path_col="video_path"):
         self.df = pd.read_csv(labels_csv, sep='\t')
         self.df = self.df[self.df["split"]==split].reset_index(drop=True)
+
+        # Ensure we have a 'form' column as incorrect/correct.
+        # If only form_subtype is present, derive form from it.
+        if "form" not in self.df.columns:
+            if "form_subtype" in self.df.columns:
+                self.df["form"] = np.where(self.df["form_subtype"].fillna("none").astype(str).str.lower() == "none",
+                                           "correct", "incorrect")
+            else:
+                raise ValueError("labels CSV must contain 'form' or 'form_subtype' to derive it.")
+
+        # Normalize values
+        self.df["exercise"] = self.df["exercise"].str.lower()
+        self.df["form"] = self.df["form"].str.lower()
+
         self.seq_len = seq_len
         self.stride = stride
         self.drop_conf = drop_conf
         self.kp_dir = Path("outputs/keypoints")
+        self.path_col = path_col
 
-        # build form vocab dynamically (correct + your three incorrects per exercise)
-        self.form_vocab = sorted(self.df["form_subtype"].fillna("none").unique().tolist())
-
-    def __len__(self): return len(self.df)
+    def __len__(self):
+        return len(self.df)
 
     def _temporal_slice(self, seq):
         T = seq.shape[0]
@@ -34,18 +48,18 @@ class KpSeqDataset(Dataset):
 
     def __getitem__(self, i):
         row = self.df.iloc[i]
-        kp = np.load(self.kp_dir / (Path(row["video_path"]).stem + ".npy"))  # (T,17,3)
+        stem = Path(row[self.path_col]).stem
+        kp_path = self.kp_dir / f"{stem}.npy"
+        kp = np.load(kp_path)  # (T,17,3)
         kp = self._temporal_slice(kp)
-        if self.drop_conf: kp = kp[..., :2]
-        # normalize by image size: assume coords already in pixels; divide by max(w,h) if you saved it
-        # here assume coords in resized frame; scale to [0,1] by dividing by 640 (adjust if needed)
-        kp = kp / 640.0
+        if self.drop_conf:
+            kp = kp[..., :2]
 
-        # shape to (C,T) for simple CNN1D over joints
-        # Option 1: flatten joints: (T, 17*2)
-        feat = kp.reshape(kp.shape[0], -1).astype(np.float32)  # (T, 34)
-        x = torch.from_numpy(feat)                             # (T, 34)
+        # Normalize coordinates (adjust divisor if your preprocess chose different size)
+        feat = (kp / 640.0).reshape(kp.shape[0], -1).astype(np.float32)  # (T,34)
+        x = torch.from_numpy(feat)
 
         y_ex = to_id(row["exercise"], EXERCISES)
-        y_form = to_id(row["form_subtype"] if isinstance(row["form_subtype"], str) else "none", self.form_vocab)
+        y_form = 1 if row["form"] == "correct" else 0  # incorrect=0, correct=1
+
         return x, torch.tensor(y_ex), torch.tensor(y_form)

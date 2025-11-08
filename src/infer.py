@@ -1,6 +1,6 @@
 import torch, numpy as np, cv2, sys
 from ultralytics import YOLO
-from train_seq import CNNBiLSTM, EXERCISES
+from train_seq import CNNBiLSTM, EXERCISES, FORM_LABELS
 
 def extract_kp_seq(video_path, model_name="yolov8n-pose.pt"):
     model = YOLO(model_name)
@@ -11,9 +11,8 @@ def extract_kp_seq(video_path, model_name="yolov8n-pose.pt"):
         if not ok: break
         res = model.predict(frame[:, :, ::-1], conf=0.25, verbose=False)
         if len(res)==0 or len(res[0].keypoints)==0:
-            seq.append(np.zeros((17,2), dtype=np.float32))
-            continue
-        kp = res[0].keypoints.xy[0].cpu().numpy()  # (17,2)
+            seq.append(np.zeros((17,2), dtype=np.float32)); continue
+        kp = res[0].keypoints.xy[0].cpu().numpy()
         seq.append(kp)
     cap.release()
     if len(seq)==0: return None
@@ -23,14 +22,13 @@ def extract_kp_seq(video_path, model_name="yolov8n-pose.pt"):
 
 def predict(video_path, ckpt="outputs/models/seq_model.pt"):
     data = torch.load(ckpt, map_location="cpu")
-    form_vocab = data["form_vocab"]
-    model = CNNBiLSTM(in_dim=34, num_ex=len(EXERCISES), num_form=len(form_vocab))
+    model = CNNBiLSTM(in_dim=34, num_ex=len(EXERCISES), num_form=2)
     model.load_state_dict(data["model"]); model.eval()
 
     x = extract_kp_seq(video_path)
     with torch.no_grad():
         ex, fm = model(x)
-    return EXERCISES[ex.argmax(1).item()], form_vocab[fm.argmax(1).item()]
+    return EXERCISES[ex.argmax(1).item()], FORM_LABELS[fm.argmax(1).item()]
 
 if __name__ == "__main__":
     v = sys.argv[1]
