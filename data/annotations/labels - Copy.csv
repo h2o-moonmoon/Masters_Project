@@ -1,0 +1,7 @@
+video_path,exercise,form,form_subtype,visibility,split
+raw_videos/squat/squat_hi_01.mp4,squat,correct,none,high,train
+raw_videos/squat/squat_hi_02.mp4,squat,incorrect,knee_inward,high,train
+raw_videos/squat/squat_lo_01.mp4,squat,correct,none,low,test
+raw_videos/squat/squat_lo_02.mp4,squat,incorrect,back_rounding,low,train
+raw_videos/deadlift/deadlift_hi_03.mp4,deadlift,incorrect,high_hips,high,val
+raw_videos/deadlift/deadlift_hi_04.mp4,deadlift,incorrect,far_bar,high,train
