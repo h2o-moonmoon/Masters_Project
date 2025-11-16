@@ -8,7 +8,7 @@ from tqdm import tqdm
 from ultralytics import YOLO
 import torch
 
-# We’ll save (T, 17, 3): x, y, conf per keypoint (conf is safe even if model doesn’t provide kp conf)
+# Save (T, 17, 3): x, y, conf per keypoint (conf is safe even if model doesn’t provide kp conf)
 DEFAULT_MODEL = "yolov8n-pose.pt"
 CONF_THRESH = 0.25
 

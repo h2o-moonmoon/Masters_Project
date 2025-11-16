@@ -55,7 +55,7 @@ class KpSeqDataset(Dataset):
         if self.drop_conf:
             kp = kp[..., :2]
 
-        # Normalize coordinates (adjust divisor if your preprocess chose different size)
+        # Normalize coordinates (adjust divisor if preprocess chose different size)
         feat = (kp / 640.0).reshape(kp.shape[0], -1).astype(np.float32)  # (T,34)
         x = torch.from_numpy(feat)
 
