@@ -27,20 +27,23 @@ def main():
     ap.add_argument("--augment", action="store_true")
     ap.add_argument(
         "--task", type=str, default="ex_form_type",
-        choices=["exercise", "ex_form", "ex_form_type"],
-        help="What to train: exercise only, exercise+form, or exercise+form+type."
+        choices=["exercise", "ex_form", "ex_form_type", "per_exercise"],
+        help="What to train: exercise only, exercise+form, full multitask, or per-exercise form+type."
     )
+    ap.add_argument("--exercise-filter", type=str, default="", help="If set, restrict to one exercise.")
     args = ap.parse_args()
     torch.backends.cudnn.benchmark = True
     aug_tag = "aug" if args.augment else "noaug"
+    exercise_filter = args.exercise_filter or None
+    exercise_tag = exercise_filter if exercise_filter is not None else "all"
 
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     splits = load_splits()
     key = str(args.split)
-    train_ds = PoseDataset(splits[key]["train"], mode=args.mode)
-    val_ds   = PoseDataset(splits[key]["val"],   mode=args.mode)
-    test_ds  = PoseDataset(splits[key]["test"],  mode=args.mode)
+    train_ds = PoseDataset(splits[key]["train"], mode=args.mode, exercise_filter=exercise_filter)
+    val_ds   = PoseDataset(splits[key]["val"],   mode=args.mode, exercise_filter=exercise_filter)
+    test_ds  = PoseDataset(splits[key]["test"],  mode=args.mode, exercise_filter=exercise_filter)
     train_dl = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=4)
     val_dl   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False, num_workers=4)
     test_dl  = DataLoader(test_ds,  batch_size=args.batch_size, shuffle=False, num_workers=4)
@@ -72,13 +75,31 @@ def main():
         print(f"[{ep:03d}] train_loss={total/len(train_ds):.4f} | "
               f"val_formF1={val['form_f1']:.3f} val_typeF1={val['type_f1']:.3f} | "
               f"test_formF1={test['form_f1']:.3f} test_typeF1={test['type_f1']:.3f}")
-        model_tag = f"pose_rnn_gru128_{args.task}"
+        model_tag = f"pose_rnn_gru128_{args.task}_{exercise_tag}"
         outdir = ROOT / "analysis" / model_tag / f"split{args.split}_{args.mode}"
         outdir.mkdir(parents=True, exist_ok=True)
 
         ckpt_dir = ROOT / "checkpoints"
         ckpt_dir.mkdir(exist_ok=True)
-        ckpt_path = ckpt_dir / f"pose_rnn_{args.task}_split{args.split}_{args.mode}_seed{args.seed}.pt"
+        task_tag = getattr(args, "task", "ex_form_type")
+        ckpt_name = f"pose_rnn_{task_tag}_{exercise_filter}_{aug_tag}_split{args.split}_{args.mode}_seed{args.seed}.pt"
+        ckpt_path = ckpt_dir / ckpt_name
+
+        # save best-by-validation-loss
+        best_val = float("inf")
+        val_loss = val["loss"]
+        if val_loss < best_val:
+            best_val = val_loss
+            torch.save(
+                {
+                    "model": model.state_dict(),
+                    "args": vars(args),
+                    "val": val,
+                    "test": test,
+                },
+                ckpt_path,
+            )
+            print(f"  -> New best val_loss={best_val:.4f}, checkpoint saved to {ckpt_path}")
 
         form_names = ["correct", "incorrect"]
         type_names = ["upper", "lower"]

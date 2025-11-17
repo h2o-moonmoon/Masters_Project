@@ -9,11 +9,16 @@ from datasets.core import ROOT, META_CSV, SEG_JSON, build_label_maps, POSES_DIR
 
 class PoseDataset(Dataset):
     def __init__(self, split_files, metadata_csv=META_CSV, segments_json=SEG_JSON,
-                 mode="rep", num_frames=48):
+                 mode="rep", num_frames=48, exercise_filter=None):
         self.mode = mode
         self.num_frames = num_frames
         self.df = pd.read_csv(metadata_csv)
         self.df = self.df[self.df["file"].isin(split_files)].copy()
+        self.exercise_filter = exercise_filter
+        if self.exercise_filter is not None:
+            self.df = self.df[self.df["exercise"] == self.exercise_filter].copy()
+            if len(self.df) == 0:
+                raise ValueError(f"No samples for exercise_filter='{self.exercise_filter}'")
         self.maps = build_label_maps(self.df)
         with open(segments_json, "r") as f:
             self.segs = json.load(f)

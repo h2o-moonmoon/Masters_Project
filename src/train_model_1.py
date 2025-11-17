@@ -109,19 +109,14 @@ def multitask_loss(logits_ex, logits_form, logits_type, y_ex, y_form, y_type, ty
 
 def compute_loss_for_task(logits_ex, logits_form, logits_type,
                           y_ex, y_form, y_type, args):
-    """
-    Wraps multitask_loss but can drop some heads depending on args.task.
-    """
     task = getattr(args, "task", "ex_form_type")
 
     if task == "exercise":
-        # exercise-only model: ignore form and type entirely
         ce_ex = torch.nn.CrossEntropyLoss()
         loss_ex = ce_ex(logits_ex, y_ex)
         return loss_ex, {"ex": loss_ex.item(), "form": 0.0, "type": 0.0}
 
     elif task == "ex_form":
-        # exercise + form: no type loss
         ce_ex = torch.nn.CrossEntropyLoss()
         ce_form = torch.nn.CrossEntropyLoss()
         loss_ex = ce_ex(logits_ex, y_ex)
@@ -129,14 +124,35 @@ def compute_loss_for_task(logits_ex, logits_form, logits_type,
         total = loss_ex + loss_form
         return total, {"ex": loss_ex.item(), "form": loss_form.item(), "type": 0.0}
 
-    else:
-        # full model (exercise + form + type) — existing behaviour
+    elif task == "per_exercise":
+        # Per-exercise specialist: ignore exercise head, use form + type
+        # Form loss: same as ex_form (you can plug in class-weights/focal here)
+        ce_form = torch.nn.CrossEntropyLoss()
+        loss_form = ce_form(logits_form, y_form)
+
+        # Type loss: same masking you use in multitask_loss
+        incorrect_mask = (y_form != 0).float()
+        if incorrect_mask.sum() > 0:
+            ce_type = torch.nn.CrossEntropyLoss(reduction='none')(logits_type, y_type)
+            loss_type = (ce_type * incorrect_mask).sum() / incorrect_mask.sum()
+        else:
+            loss_type = torch.tensor(0.0, device=logits_form.device)
+
+        total = loss_form + args.type_loss_weight * loss_type
+        return total, {
+            "ex": 0.0,
+            "form": loss_form.item(),
+            "type": loss_type.item(),
+        }
+
+    else:  # "ex_form_type"
         total, parts = multitask_loss(
             logits_ex, logits_form, logits_type,
             y_ex, y_form, y_type,
             type_mask_weight=args.type_loss_weight
         )
         return total, parts
+
 
 
 # -------------------------
@@ -228,13 +244,13 @@ def evaluate(model, loader, device, args, input_key: str = "video"):
     ex_acc, ex_f1 = compute_metrics(ex_true, ex_pred, average='macro')
 
     # Form metrics only if model is supervising form
-    if task in ("ex_form", "ex_form_type"):
+    if task in ("ex_form", "ex_form_type", "per_exercise"):
         form_acc, form_f1 = compute_metrics(form_true, form_pred, average='macro')
     else:
         form_acc, form_f1 = float('nan'), float('nan')
 
     # Type metrics only if model is supervising type
-    if task == "ex_form_type" and len(type_mask) > 0:
+    if task in ("ex_form_type", "per_exercise") and len(type_mask) > 0:
         type_acc, type_f1 = compute_metrics(type_true, type_pred, average='macro')
     else:
         type_acc, type_f1 = float('nan'), float('nan')
@@ -278,18 +294,23 @@ def main():
     ap.add_argument("--amp", action="store_true")
     ap.add_argument("--type-loss-weight", type=float, default=1.0)
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--form-class-weights", type=str, default="", help="e.g., '1.0,1.5' for [correct,incorrect]")
+    ap.add_argument("--form-class-weights", type=str, default="",
+                    help="e.g., '1.0,1.5' for [correct,incorrect]")
     ap.add_argument("--form-focal-gamma", type=float, default=0.0, help=">0 enables focal loss for form")
     ap.add_argument("--form-loss-weight", type=float, default=1.0)
     ap.add_argument(
         "--task", type=str, default="ex_form_type",
-                    choices=["exercise", "ex_form", "ex_form_type"],
-                    help="What to train: exercise only, exercise+form, or exercise+form+type."
+        choices=["exercise", "ex_form", "ex_form_type", "per_exercise"],
+        help="What to train: exercise only, exercise+form, full multitask, or per-exercise form+type."
     )
+    ap.add_argument("--exercise-filter", type=str, default="",
+        help="If set, restrict training/val/test to a single exercise name (e.g., 'Deadlift').")
     args = ap.parse_args()
     torch.backends.cudnn.benchmark = True
     aug_tag = "aug" if args.augment else "noaug"
     task_tag = args.task
+    exercise_filter = args.exercise_filter or None
+    exercise_tag = exercise_filter if exercise_filter is not None else "all"
 
     set_seed(args.seed)
 
@@ -306,6 +327,7 @@ def main():
         num_frames=args.frames,
         resize=args.size,
         include_pose=False,
+        exercise_filter=exercise_filter,
     )
 
     # Model & optimizer
@@ -316,7 +338,7 @@ def main():
     best_val = float("inf")
     ckpt = ROOT / "checkpoints"
     ckpt.mkdir(exist_ok=True)
-    ckpt_path = ckpt / f"attnpool_{task_tag}_{aug_tag}_split{args.split}_{args.mode}_seed{args.seed}.pt"
+    ckpt_path = ckpt / f"attnpool_{task_tag}_{exercise_tag}_{aug_tag}_split{args.split}_{args.mode}_seed{args.seed}.pt"
 
     for epoch in range(1, args.epochs + 1):
         train_loss = train_one_epoch(model, train_dl, opt, device, scaler, args)
@@ -324,7 +346,7 @@ def main():
         test_metrics = evaluate(model, test_dl, device, args)
 
         # choose a unique tag for this model
-        model_tag = f"rgb_attnpool_{args.backbone}_{task_tag}_{aug_tag}"
+        model_tag = f"rgb_attnpool_{args.backbone}_{args.task}_{exercise_tag}_{aug_tag}"
         outdir = ROOT / "analysis" / model_tag / f"split{args.split}_{args.mode}"
         outdir.mkdir(parents=True, exist_ok=True)
 

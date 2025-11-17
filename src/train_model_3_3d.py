@@ -94,12 +94,15 @@ def main():
     ap.add_argument("--form-loss-weight", type=float, default=1.0)
     ap.add_argument(
         "--task", type=str, default="ex_form_type",
-        choices=["exercise", "ex_form", "ex_form_type"],
-        help="What to train: exercise only, exercise+form, or exercise+form+type."
+        choices=["exercise", "ex_form", "ex_form_type", "per_exercise"],
+        help="What to train: exercise only, exercise+form, full multitask, or per-exercise form+type."
     )
+    ap.add_argument("--exercise-filter", type=str, default="", help="If set, restrict to one exercise.")
     args = ap.parse_args()
     torch.backends.cudnn.benchmark = True
     aug_tag = "aug" if args.augment else "noaug"
+    exercise_filter = args.exercise_filter or None
+    exercise_tag = exercise_filter if exercise_filter is not None else "all"
 
     set_seed(args.seed)
 
@@ -116,6 +119,7 @@ def main():
         num_frames=args.frames,
         resize=args.size,
         include_pose=False,
+        exercise_filter=exercise_filter,
     )
 
     model = Video3D_MTL(arch=args.arch, pretrained=args.pretrained).to(device)
@@ -123,7 +127,7 @@ def main():
     scaler = torch.cuda.amp.GradScaler(enabled=args.amp)
 
     best_val = float("inf")
-    model_tag = f"video3d_{args.arch}_{args.task}_{aug_tag}"
+    model_tag = f"video3d_{args.arch}_{args.task}_{exercise_tag}_{aug_tag}"
     outdir = ROOT / "analysis" / model_tag / f"split{args.split}_{args.mode}"
     outdir.mkdir(parents=True, exist_ok=True)
 

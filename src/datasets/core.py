@@ -198,6 +198,7 @@ class VideoDataset(Dataset):
         augment: bool = False,
         allow_hflip: bool = False,
         include_pose: bool = False,
+        exercise_filter = None,
     ):
         """
         split_files: list of file paths exactly as in metadata (relative to project root)
@@ -209,12 +210,17 @@ class VideoDataset(Dataset):
         self.num_frames = num_frames
         self.include_pose = include_pose
         self._lengths = {}
+        self.exercise_filter = exercise_filter
 
         # load metadata
         self.df = pd.read_csv(metadata_csv)
         self.df = self.df[self.df["file"].isin(split_files)].copy()
         if len(self.df) == 0:
             raise ValueError("No rows matched split list in metadata.")
+        if self.exercise_filter is not None:
+            self.df = self.df[self.df["exercise"] == self.exercise_filter].copy()
+            if len(self.df) == 0:
+                raise ValueError(f"No samples found for exercise_filter='{self.exercise_filter}'")
         # label maps
         self.label_maps = build_label_maps(self.df)
 
@@ -366,6 +372,7 @@ def make_dataloaders(
     num_frames: int = 32,
     resize: int = 224,
     include_pose: bool = False,
+    exercise_filter=None
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
     splits = load_splits()
     key = str(split_id)
@@ -384,6 +391,7 @@ def make_dataloaders(
         augment=augment,
         allow_hflip=allow_hflip,
         include_pose=include_pose,
+        exercise_filter=exercise_filter,
     )
     val_ds = VideoDataset(
         split_files=val_files,
@@ -393,6 +401,7 @@ def make_dataloaders(
         augment=False,                 # never augment val/test
         allow_hflip=False,
         include_pose=include_pose,
+        exercise_filter=exercise_filter,
     )
     test_ds = VideoDataset(
         split_files=test_files,
@@ -402,6 +411,7 @@ def make_dataloaders(
         augment=False,
         allow_hflip=False,
         include_pose=include_pose,
+        exercise_filter=exercise_filter,
     )
 
     # simple default collation (fixed-size tensors)
