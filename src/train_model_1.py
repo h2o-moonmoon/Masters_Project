@@ -107,6 +107,37 @@ def multitask_loss(logits_ex, logits_form, logits_type, y_ex, y_form, y_type, ty
     total = loss_ex + loss_form + type_mask_weight * loss_type
     return total, {"ex": loss_ex.item(), "form": loss_form.item(), "type": loss_type.item()}
 
+def compute_loss_for_task(logits_ex, logits_form, logits_type,
+                          y_ex, y_form, y_type, args):
+    """
+    Wraps multitask_loss but can drop some heads depending on args.task.
+    """
+    task = getattr(args, "task", "ex_form_type")
+
+    if task == "exercise":
+        # exercise-only model: ignore form and type entirely
+        ce_ex = torch.nn.CrossEntropyLoss()
+        loss_ex = ce_ex(logits_ex, y_ex)
+        return loss_ex, {"ex": loss_ex.item(), "form": 0.0, "type": 0.0}
+
+    elif task == "ex_form":
+        # exercise + form: no type loss
+        ce_ex = torch.nn.CrossEntropyLoss()
+        ce_form = torch.nn.CrossEntropyLoss()
+        loss_ex = ce_ex(logits_ex, y_ex)
+        loss_form = ce_form(logits_form, y_form)
+        total = loss_ex + loss_form
+        return total, {"ex": loss_ex.item(), "form": loss_form.item(), "type": 0.0}
+
+    else:
+        # full model (exercise + form + type) — existing behaviour
+        total, parts = multitask_loss(
+            logits_ex, logits_form, logits_type,
+            y_ex, y_form, y_type,
+            type_mask_weight=args.type_loss_weight
+        )
+        return total, parts
+
 
 # -------------------------
 # Metrics
@@ -124,7 +155,7 @@ def train_one_epoch(model, loader, optim, device, scaler, args):
     model.train()
     total_loss = 0.0
     for batch in loader:
-        vid = batch["video"].to(device)              # [B,T,C,H,W]
+        vid = batch["video"].to(device)
         y_ex = batch["exercise_id"].to(device)
         y_form = batch["form_id"].to(device)
         y_type = batch["subtype_id"].to(device)
@@ -132,10 +163,14 @@ def train_one_epoch(model, loader, optim, device, scaler, args):
         optim.zero_grad(set_to_none=True)
         with autocast(enabled=args.amp):
             l_ex, l_form, l_type, _ = model(vid)
-            loss, _ = multitask_loss(l_ex, l_form, l_type, y_ex, y_form, y_type, args.type_loss_weight)
+            loss, parts = compute_loss_for_task(
+                l_ex, l_form, l_type,
+                y_ex, y_form, y_type,
+                args
+            )
 
         if args.amp:
-            scaler.scale(loss).backward()  # <-- missing before
+            scaler.scale(loss).backward()
             scaler.step(optim)
             scaler.update()
         else:
@@ -143,11 +178,13 @@ def train_one_epoch(model, loader, optim, device, scaler, args):
             optim.step()
 
         total_loss += loss.item() * vid.size(0)
+
     return total_loss / len(loader.dataset)
 
 
 @torch.no_grad()
 def evaluate(model, loader, device, args, input_key: str = "video"):
+    task = getattr(args, "task", "ex_form_type")
     model.eval()
     losses = []
     ex_true, ex_pred = [], []
@@ -170,7 +207,12 @@ def evaluate(model, loader, device, args, input_key: str = "video"):
         else:
             raise RuntimeError("Model should return a tuple/list of logits.")
 
-        loss, _ = multitask_loss(l_ex, l_form, l_type, y_ex, y_form, y_type, args.type_loss_weight)
+        # loss, _ = multitask_loss(l_ex, l_form, l_type, y_ex, y_form, y_type, args.type_loss_weight)
+        loss, _ = compute_loss_for_task(
+            l_ex, l_form, l_type,
+            y_ex, y_form, y_type,
+            args
+        )
         losses.append(loss.item() * x.size(0))
 
         ex_true.extend(y_ex.cpu().tolist());     ex_pred.extend(l_ex.argmax(1).cpu().tolist())
@@ -182,9 +224,17 @@ def evaluate(model, loader, device, args, input_key: str = "video"):
             type_pred.extend(l_type[inc_mask].argmax(1).cpu().tolist())
             type_mask.extend([1] * int(inc_mask.sum().item()))
 
+    # Always compute exercise metrics (even if not trained on them, for inspection)
     ex_acc, ex_f1 = compute_metrics(ex_true, ex_pred, average='macro')
-    form_acc, form_f1 = compute_metrics(form_true, form_pred, average='macro')
-    if len(type_mask) > 0:
+
+    # Form metrics only if model is supervising form
+    if task in ("ex_form", "ex_form_type"):
+        form_acc, form_f1 = compute_metrics(form_true, form_pred, average='macro')
+    else:
+        form_acc, form_f1 = float('nan'), float('nan')
+
+    # Type metrics only if model is supervising type
+    if task == "ex_form_type" and len(type_mask) > 0:
         type_acc, type_f1 = compute_metrics(type_true, type_pred, average='macro')
     else:
         type_acc, type_f1 = float('nan'), float('nan')
@@ -231,9 +281,15 @@ def main():
     ap.add_argument("--form-class-weights", type=str, default="", help="e.g., '1.0,1.5' for [correct,incorrect]")
     ap.add_argument("--form-focal-gamma", type=float, default=0.0, help=">0 enables focal loss for form")
     ap.add_argument("--form-loss-weight", type=float, default=1.0)
+    ap.add_argument(
+        "--task", type=str, default="ex_form_type",
+                    choices=["exercise", "ex_form", "ex_form_type"],
+                    help="What to train: exercise only, exercise+form, or exercise+form+type."
+    )
     args = ap.parse_args()
     torch.backends.cudnn.benchmark = True
     aug_tag = "aug" if args.augment else "noaug"
+    task_tag = args.task
 
     set_seed(args.seed)
 
@@ -260,7 +316,7 @@ def main():
     best_val = float("inf")
     ckpt = ROOT / "checkpoints"
     ckpt.mkdir(exist_ok=True)
-    ckpt_path = ckpt / f"attnpool_{aug_tag}_split{args.split}_{args.mode}_seed{args.seed}.pt"
+    ckpt_path = ckpt / f"attnpool_{task_tag}_{aug_tag}_split{args.split}_{args.mode}_seed{args.seed}.pt"
 
     for epoch in range(1, args.epochs + 1):
         train_loss = train_one_epoch(model, train_dl, opt, device, scaler, args)
@@ -268,7 +324,7 @@ def main():
         test_metrics = evaluate(model, test_dl, device, args)
 
         # choose a unique tag for this model
-        model_tag = f"rgb_attnpool_{args.backbone}_{aug_tag}"
+        model_tag = f"rgb_attnpool_{args.backbone}_{task_tag}_{aug_tag}"
         outdir = ROOT / "analysis" / model_tag / f"split{args.split}_{args.mode}"
         outdir.mkdir(parents=True, exist_ok=True)
 

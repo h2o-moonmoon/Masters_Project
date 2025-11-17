@@ -9,8 +9,14 @@ except Exception:
     HAS_WEIGHTS = False
 
 from datasets.core import make_dataloaders, ROOT
-from train_model_1 import multitask_loss, evaluate, set_seed  # reuse your loss/metrics/evaluate (input_key="video")
-from utils.metrics import save_confusion  # you added this earlier
+from train_model_1 import (
+    multitask_loss,
+    compute_loss_for_task,
+    evaluate,
+    set_seed,
+    ROOT,
+)
+from utils.metrics import save_confusion
 
 
 class Video3D_MTL(nn.Module):
@@ -86,6 +92,11 @@ def main():
     ap.add_argument("--form-class-weights", type=str, default="", help="e.g., '1.0,1.5' for [correct,incorrect]")
     ap.add_argument("--form-focal-gamma", type=float, default=0.0, help=">0 enables focal loss for form")
     ap.add_argument("--form-loss-weight", type=float, default=1.0)
+    ap.add_argument(
+        "--task", type=str, default="ex_form_type",
+        choices=["exercise", "ex_form", "ex_form_type"],
+        help="What to train: exercise only, exercise+form, or exercise+form+type."
+    )
     args = ap.parse_args()
     torch.backends.cudnn.benchmark = True
     aug_tag = "aug" if args.augment else "noaug"
@@ -112,7 +123,7 @@ def main():
     scaler = torch.cuda.amp.GradScaler(enabled=args.amp)
 
     best_val = float("inf")
-    model_tag = f"video3d_{args.arch}_{aug_tag}"
+    model_tag = f"video3d_{args.arch}_{args.task}_{aug_tag}"
     outdir = ROOT / "analysis" / model_tag / f"split{args.split}_{args.mode}"
     outdir.mkdir(parents=True, exist_ok=True)
 
@@ -133,7 +144,11 @@ def main():
             opt.zero_grad(set_to_none=True)
             with torch.cuda.amp.autocast(enabled=args.amp):
                 l_ex, l_form, l_type = model(x)
-                loss, _ = multitask_loss(l_ex, l_form, l_type, y_ex, y_form, y_type, args.type_loss_weight)
+                loss, parts = compute_loss_for_task(
+                    l_ex, l_form, l_type,
+                    y_ex, y_form, y_type,
+                    args
+                )
 
             if args.amp:
                 scaler.scale(loss).backward()

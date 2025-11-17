@@ -3,7 +3,13 @@ from torch.utils.data import DataLoader
 from datasets.core import load_splits
 from datasets.pose import PoseDataset
 from models.pose_rnn import PoseGRU_MTL
-from train_model_1 import multitask_loss, evaluate, set_seed, ROOT
+from train_model_1 import (
+    multitask_loss,
+    compute_loss_for_task,
+    evaluate,
+    set_seed,
+    ROOT,
+)
 from utils.metrics import save_confusion
 
 def main():
@@ -19,6 +25,11 @@ def main():
     ap.add_argument("--form-focal-gamma", type=float, default=0.0, help=">0 enables focal loss for form")
     ap.add_argument("--form-loss-weight", type=float, default=1.0)
     ap.add_argument("--augment", action="store_true")
+    ap.add_argument(
+        "--task", type=str, default="ex_form_type",
+        choices=["exercise", "ex_form", "ex_form_type"],
+        help="What to train: exercise only, exercise+form, or exercise+form+type."
+    )
     args = ap.parse_args()
     torch.backends.cudnn.benchmark = True
     aug_tag = "aug" if args.augment else "noaug"
@@ -43,19 +54,31 @@ def main():
         total = 0.0
         for b in train_dl:
             opt.zero_grad(set_to_none=True)
-            y_ex, y_form, y_type = b["exercise_id"].to(device), b["form_id"].to(device), b["subtype_id"].to(device)
+            y_ex = b["exercise_id"].to(device)
+            y_form = b["form_id"].to(device)
+            y_type = b["subtype_id"].to(device)
+
             l_ex, l_form, l_type = model(b["pose"].to(device))
-            loss, _ = multitask_loss(l_ex, l_form, l_type, y_ex, y_form, y_type, args.type_loss_weight)
-            loss.backward(); opt.step()
+            loss, parts = compute_loss_for_task(
+                l_ex, l_form, l_type,
+                y_ex, y_form, y_type,
+                args
+            )
+            loss.backward()
+            opt.step()
             total += loss.item() * y_ex.size(0)
         val = evaluate(model, val_dl, device, args, input_key="pose")
         test = evaluate(model, test_dl, device, args, input_key="pose")
         print(f"[{ep:03d}] train_loss={total/len(train_ds):.4f} | "
               f"val_formF1={val['form_f1']:.3f} val_typeF1={val['type_f1']:.3f} | "
               f"test_formF1={test['form_f1']:.3f} test_typeF1={test['type_f1']:.3f}")
-        model_tag = f"pose_rnn_gru128_{aug_tag}"  # adjust per hidden size, layers, etc.
+        model_tag = f"pose_rnn_gru128_{args.task}"
         outdir = ROOT / "analysis" / model_tag / f"split{args.split}_{args.mode}"
         outdir.mkdir(parents=True, exist_ok=True)
+
+        ckpt_dir = ROOT / "checkpoints"
+        ckpt_dir.mkdir(exist_ok=True)
+        ckpt_path = ckpt_dir / f"pose_rnn_{args.task}_split{args.split}_{args.mode}_seed{args.seed}.pt"
 
         form_names = ["correct", "incorrect"]
         type_names = ["upper", "lower"]
